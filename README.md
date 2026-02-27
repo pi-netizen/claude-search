@@ -1,5 +1,7 @@
 # claude-search
 
+[![npm version](https://img.shields.io/npm/v/claude-search.svg)](https://www.npmjs.com/package/claude-search)
+
 Full-text search across all your [Claude Code](https://claude.ai/code) session history — find past conversations, extract code snippets, inspect session metadata, and jump straight back into any session.
 
 ```
@@ -38,10 +40,13 @@ claude-search --help
 ## Development
 
 ```bash
-npm test        # run the unit test suite (Node.js 18+ built-in test runner)
+git clone https://github.com/pi-netizen/claude-search.git
+cd claude-search
+npm install
+npm test        # Node.js 18+ built-in test runner, no extra deps
 ```
 
-Tests cover `parseSince`, `extractCodeBlocks`, `projectName`, and `loadMessages` (including corrupt-line handling). No extra dependencies required.
+Tests cover `parseSince`, `extractCodeBlocks`, `projectName`, and `loadMessages` (including corrupt-line handling).
 
 ---
 

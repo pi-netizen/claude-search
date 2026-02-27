@@ -46,6 +46,16 @@ claude-search --help
 
 ---
 
+## Development
+
+```bash
+npm test        # run the unit test suite (Node.js 18+ built-in test runner)
+```
+
+Tests cover `parseSince`, `extractCodeBlocks`, `projectName`, and `loadMessages` (including corrupt-line handling). No extra dependencies required.
+
+---
+
 ## User Journeys
 
 ### 1. "I remember solving this problem — where did I do it?"

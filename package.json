@@ -1,0 +1,19 @@
+{
+  "name": "claude-search",
+  "version": "0.1.0",
+  "description": "Search across all your Claude Code session history",
+  "type": "module",
+  "bin": {
+    "claude-search": "./bin/claude-search.js"
+  },
+  "scripts": {
+    "start": "node bin/claude-search.js"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^13.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

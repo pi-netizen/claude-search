@@ -176,6 +176,57 @@ async function loadMessages(filePath) {
   };
 }
 
+/**
+ * Find a session file by its ID (UUID filename without .jsonl).
+ * Searches recursively under sessionsDir.
+ */
+async function findSessionFile(sessionsDir, sessionId) {
+  const entries = await readdir(sessionsDir, { recursive: true });
+  const rel = entries.find((e) => e === `${sessionId}.jsonl` || e.endsWith(`/${sessionId}.jsonl`));
+  return rel ? join(sessionsDir, rel) : null;
+}
+
+// ── session details ────────────────────────────────────────────────────────
+
+export async function sessionDetails(sessionId, {
+  sessionsDir = join(homedir(), '.claude', 'projects'),
+} = {}) {
+  const filePath = await findSessionFile(sessionsDir, sessionId);
+  if (!filePath) {
+    console.error(chalk.red(`Session not found: ${sessionId}`));
+    process.exit(1);
+  }
+
+  const { records, messages } = await loadMessages(filePath);
+  const proj       = projectName(sessionsDir, filePath);
+  const firstTs    = records[0]?.timestamp;
+  const lastTs     = records[records.length - 1]?.timestamp;
+  const userMsgs   = messages.filter((m) => (m.message?.role ?? m.type) === 'user');
+  const asstMsgs   = messages.filter((m) => (m.message?.role ?? m.type) === 'assistant');
+  const firstPrompt = extractText(userMsgs[0]?.message?.content ?? '');
+  const lastPrompt  = extractText(userMsgs[userMsgs.length - 1]?.message?.content ?? '');
+  const gitRemote   = await resolveGitRemote(sessionsDir, filePath);
+
+  console.log('\n' + chalk.cyan.bold(proj));
+  if (gitRemote) console.log(chalk.dim(`  repo    `) + gitRemote.replace(/\.git$/, ''));
+  console.log(chalk.dim(`  session `) + sessionId);
+  console.log(chalk.dim(`  file    `) + filePath);
+  console.log(chalk.dim(`  started `) + formatDate(firstTs) + (firstTs ? chalk.dim(` at ${new Date(firstTs).toLocaleTimeString()}`) : ''));
+  console.log(chalk.dim(`  ended   `) + formatDate(lastTs)  + (lastTs  ? chalk.dim(` at ${new Date(lastTs).toLocaleTimeString()}`)  : ''));
+  console.log(chalk.dim(`  turns   `) + `${userMsgs.length} user  ·  ${asstMsgs.length} assistant  ·  ${records.length} total records`);
+  console.log(chalk.dim(`  resume  `) + chalk.yellow(`claude --resume ${sessionId}`));
+
+  if (firstPrompt) {
+    console.log('\n' + chalk.dim('── first prompt ') + chalk.dim('─'.repeat(53)));
+    console.log('  ' + firstPrompt.slice(0, 300) + (firstPrompt.length > 300 ? '…' : ''));
+  }
+  if (lastPrompt && lastPrompt !== firstPrompt) {
+    console.log('\n' + chalk.dim('── last prompt ') + chalk.dim('─'.repeat(54)));
+    console.log('  ' + lastPrompt.slice(0, 300) + (lastPrompt.length > 300 ? '…' : ''));
+  }
+  console.log('');
+}
+
 // ── core search ────────────────────────────────────────────────────────────
 
 export async function search(query, {
@@ -187,6 +238,7 @@ export async function search(query, {
   since         = null,    // Date | null
   codeOnly      = false,   // boolean
   showReasoning = false,   // boolean
+  open          = false,   // boolean — launch first match in claude
 } = {}) {
   let entries;
   try {
@@ -272,7 +324,20 @@ export async function search(query, {
     return new Date(b.timestamp) - new Date(a.timestamp);
   });
 
-  printResults(matches.slice(0, limit), query, matches.length, { codeOnly, showReasoning });
+  const displayed = matches.slice(0, limit);
+  printResults(displayed, query, matches.length, { codeOnly, showReasoning });
+
+  // ── --open: launch first match in Claude Code ────────────────────────────
+  if (open && displayed.length > 0) {
+    const firstId = displayed[0].sessionId;
+    console.log(chalk.dim(`Opening session ${firstId.slice(0, 8)}… (claude --resume ${firstId})\n`));
+    try {
+      const { spawn } = await import('child_process');
+      spawn('claude', ['--resume', firstId], { stdio: 'inherit', detached: true }).unref();
+    } catch {
+      console.error(chalk.red('Could not launch claude. Make sure it is in your PATH.'));
+    }
+  }
 }
 
 // ── output formatting ──────────────────────────────────────────────────────
@@ -336,11 +401,13 @@ function printResults(matches, query, totalFound, { codeOnly, showReasoning }) {
       const remoteTag = m.gitRemote
         ? chalk.dim(`  [${m.gitRemote.replace(/^https?:\/\//, '').replace(/\.git$/, '')}]`)
         : '';
+      const resumeHint = chalk.dim(`  · claude --resume ${m.sessionId}`);
       console.log(
         chalk.cyan.bold(m.project) +
         chalk.dim(`  ›  ${m.sessionId.slice(0, 8)}  ·  ${date}`) +
         remoteTag
       );
+      console.log(resumeHint);
       console.log(chalk.dim('─'.repeat(70)));
       lastFile = m.filePath;
     }

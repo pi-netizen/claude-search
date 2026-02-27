@@ -24,19 +24,8 @@ Claude Code stores every conversation as a `.jsonl` file under `~/.claude/projec
 ## Installation
 
 ```bash
-git clone https://github.com/pi-netizen/claude-search.git
-cd claude-search
-npm install
-npm link        # makes `claude-search` available globally
+npm install -g claude-search
 ```
-
-> **Permission error on `npm link`?** Run this once to fix it:
-> ```bash
-> mkdir -p ~/.npm-global
-> npm config set prefix '~/.npm-global'
-> echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc
-> source ~/.zshrc
-> ```
 
 Verify it works:
 

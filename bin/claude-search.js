@@ -32,8 +32,15 @@ program
   .option('--reasoning',          'Show AI reasoning/thinking lines around the match')
   .option('--open',               'Open the first matching session in Claude Code')
   .action(async (query, opts) => {
-    if (!query) {
-      program.help();
+    if (!query) program.help();
+
+    function positiveInt(val, flag) {
+      const n = parseInt(val, 10);
+      if (isNaN(n) || n < 1) {
+        console.error(`Error: ${flag} must be a positive integer (got "${val}")`);
+        process.exit(1);
+      }
+      return n;
     }
 
     let since = null;
@@ -48,9 +55,9 @@ program
 
     await search(query, {
       sessionsDir:   opts.dir,
-      limit:         parseInt(opts.limit, 10),
+      limit:         positiveInt(opts.limit,   '--limit'),
       project:       opts.project ?? null,
-      context:       parseInt(opts.context, 10),
+      context:       positiveInt(opts.context, '--context'),
       caseSensitive: opts.caseSensitive ?? false,
       since,
       codeOnly:      opts.codeOnly ?? false,

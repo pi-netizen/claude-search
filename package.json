@@ -7,7 +7,8 @@
     "claude-search": "./bin/claude-search.js"
   },
   "scripts": {
-    "start": "node bin/claude-search.js"
+    "start": "node bin/claude-search.js",
+    "test": "node --test test/search.test.js"
   },
   "dependencies": {
     "chalk": "^5.3.0",

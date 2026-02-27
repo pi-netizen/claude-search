@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-function extractText(content) {
+export function extractText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content
@@ -23,7 +23,7 @@ function extractText(content) {
  * Extract fenced code blocks from message content.
  * Returns array of { lang, code } objects.
  */
-function extractCodeBlocks(content) {
+export function extractCodeBlocks(content) {
   const text = extractText(content);
   const blocks = [];
   const fence = /```(\w*)\n([\s\S]*?)```/g;
@@ -38,7 +38,7 @@ function extractCodeBlocks(content) {
  * Convert a project directory slug back to a readable name.
  * e.g. "-Users-piyushk-toptal-maestro" → "toptal-maestro"
  */
-function projectName(sessionsDir, filePath) {
+export function projectName(sessionsDir, filePath) {
   const rel = filePath.slice(sessionsDir.length + 1);
   const dir = rel.split('/')[0];
   const homePrefix = '-' + homedir().slice(1).replace(/\//g, '-') + '-';
@@ -46,34 +46,72 @@ function projectName(sessionsDir, filePath) {
 }
 
 /**
- * Convert the project slug back to the filesystem path it encodes.
- * e.g. "-Users-piyushk-Projects-myapp" → "/Users/piyushk/Projects/myapp"
- */
-function slugToPath(dir) {
-  // Slugs replace '/' with '-'; they start with '-' because the path
-  // starts with '/'. Re-join by replacing '-' with '/' carefully:
-  // only the first char is a guaranteed separator.
-  return dir.replace(/-/g, '/');
-}
-
-/**
  * Try to resolve the git remote URL for a project directory slug.
- * Returns the remote URL string, or null if the directory isn't a git repo.
+ *
+ * Slugs are absolute paths with every '/' replaced by '-', e.g.:
+ *   "-Users-piyushk-Projects-my-app"  →  /Users/piyushk/Projects/my-app
+ *
+ * The ambiguity: we can't tell a path separator from a literal hyphen in a
+ * directory name.  Strategy: strip the known home-dir prefix, then walk the
+ * remaining slug character-by-character, checking each possible split against
+ * the real filesystem.  First existing directory wins.
  */
 async function resolveGitRemote(sessionsDir, filePath) {
-  const rel = filePath.slice(sessionsDir.length + 1);
+  const rel  = filePath.slice(sessionsDir.length + 1);
   const slug = rel.split('/')[0];
-  const repoPath = slugToPath(slug);
+  const home = homedir();
+
+  // The slug starts with the home dir encoded as '-Users-name-...-'
+  const homeSlug = home.slice(1).replace(/\//g, '-'); // e.g. 'Users/piyushk' → 'Users-piyushk'
+  const prefix   = '-' + homeSlug + '-';
+
+  if (!slug.startsWith(prefix)) return null;
+
+  // Remainder after the home prefix: e.g. 'Projects-my-app'
+  const remainder = slug.slice(prefix.length);
+  const parts     = remainder.split('-');
+
+  // Try every possible grouping of parts as path segments (greedy, depth-first).
+  // For 'Projects-my-app': try ['Projects/my-app'], ['Projects', 'my-app'], etc.
+  const candidate = await findExistingPath(home, parts);
+  if (!candidate) return null;
 
   try {
-    await access(join(repoPath, '.git'));
+    await access(join(candidate, '.git'));
     const { stdout } = await execFileAsync('git', [
-      '-C', repoPath, 'remote', 'get-url', 'origin',
+      '-C', candidate, 'remote', 'get-url', 'origin',
     ], { timeout: 2000 });
     return stdout.trim() || null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Given a base directory and an array of slug parts (split on '-'),
+ * reconstruct the real filesystem path by trying all ways to group
+ * consecutive parts into a single directory name.
+ *
+ * Returns the first path (deepest match) that exists on disk, or null.
+ */
+async function findExistingPath(base, parts) {
+  if (parts.length === 0) return base;
+
+  // Build progressively longer first-segment candidates
+  for (let take = 1; take <= parts.length; take++) {
+    const segment   = parts.slice(0, take).join('-');
+    const candidate = join(base, segment);
+
+    let exists = false;
+    try { await access(candidate); exists = true; } catch { /* noop */ }
+
+    if (exists) {
+      // Recurse into the remaining parts
+      const deeper = await findExistingPath(candidate, parts.slice(take));
+      if (deeper !== null) return deeper;
+    }
+  }
+  return null;
 }
 
 /**
@@ -164,12 +202,18 @@ function extractReasoningSnippet(content, query, lineContext = 3) {
 
 // ── file loading ───────────────────────────────────────────────────────────
 
-async function loadMessages(filePath) {
+export async function loadMessages(filePath) {
   const raw = await readFile(filePath, 'utf8');
-  const records = raw.split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => JSON.parse(l));
+  const records = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      records.push(JSON.parse(trimmed));
+    } catch {
+      // skip corrupt / truncated lines (common when Claude crashes mid-write)
+    }
+  }
   return {
     records,
     messages: records.filter((r) => r.type === 'user' || r.type === 'assistant'),
@@ -253,69 +297,78 @@ export async function search(query, {
   const needle = caseSensitive ? query : query.toLowerCase();
   const matches = [];
 
-  // Cache git remotes per project dir to avoid repeated git calls
+  // Cache git remotes per project dir — keyed by dir, resolved lazily once.
   const remoteCache = new Map();
 
-  for (const filePath of files) {
-    const proj = projectName(sessionsDir, filePath);
-    if (project && !proj.toLowerCase().includes(project.toLowerCase())) continue;
+  // Scan files in parallel with a concurrency cap to avoid fd exhaustion.
+  const CONCURRENCY = 20;
+  const queue = [...files];
 
-    let messages, records;
-    try {
-      ({ messages, records } = await loadMessages(filePath));
-    } catch {
-      continue;
-    }
+  async function worker() {
+    while (queue.length > 0) {
+      const filePath = queue.shift();
+      const proj = projectName(sessionsDir, filePath);
+      if (project && !proj.toLowerCase().includes(project.toLowerCase())) continue;
 
-    // ── temporal filter ──────────────────────────────────────────────────
-    const sessionTs = records[0]?.timestamp;
-    if (since && sessionTs && new Date(sessionTs) < since) continue;
-
-    // ── project scoping: resolve git remote once per project dir ─────────
-    const projDir = dirname(filePath);
-    if (!remoteCache.has(projDir)) {
-      remoteCache.set(projDir, await resolveGitRemote(sessionsDir, filePath));
-    }
-    const gitRemote = remoteCache.get(projDir);
-
-    for (let i = 0; i < messages.length; i++) {
-      const msg     = messages[i];
-      const content = msg.message?.content;
-      const text    = extractText(content);
-      const haystack = caseSensitive ? text : text.toLowerCase();
-
-      if (!haystack.includes(needle)) continue;
-
-      // ── code-only filter ───────────────────────────────────────────────
-      const codeBlocks = extractCodeBlocks(content);
-      if (codeOnly) {
-        const codeMatches = codeBlocks.filter((b) => {
-          const h = caseSensitive ? b.code : b.code.toLowerCase();
-          return h.includes(needle);
-        });
-        if (codeMatches.length === 0) continue;
+      let messages, records;
+      try {
+        ({ messages, records } = await loadMessages(filePath));
+      } catch {
+        continue;
       }
 
-      // ── reasoning snapshot ─────────────────────────────────────────────
-      const reasoning = showReasoning
-        ? extractReasoningSnippet(content, query)
-        : null;
+      // ── temporal filter ────────────────────────────────────────────────
+      const sessionTs = records[0]?.timestamp;
+      if (since && sessionTs && new Date(sessionTs) < since) continue;
 
-      matches.push({
-        filePath,
-        project:    proj,
-        gitRemote,
-        sessionId:  basename(filePath, '.jsonl'),
-        timestamp:  msg.timestamp ?? sessionTs,
-        role:       msg.message?.role ?? msg.type,
-        text,
-        codeBlocks,
-        reasoning,
-        before: messages.slice(Math.max(0, i - context), i),
-        after:  messages.slice(i + 1, i + 1 + context),
-      });
+      // ── project scoping: resolve git remote once per project dir ───────
+      const projDir = dirname(filePath);
+      if (!remoteCache.has(projDir)) {
+        remoteCache.set(projDir, resolveGitRemote(sessionsDir, filePath));
+      }
+      const gitRemote = await remoteCache.get(projDir);
+
+      for (let i = 0; i < messages.length; i++) {
+        const msg     = messages[i];
+        const content = msg.message?.content;
+        const text    = extractText(content);
+        const haystack = caseSensitive ? text : text.toLowerCase();
+
+        if (!haystack.includes(needle)) continue;
+
+        // ── code-only filter ─────────────────────────────────────────────
+        const codeBlocks = extractCodeBlocks(content);
+        if (codeOnly) {
+          const codeMatches = codeBlocks.filter((b) => {
+            const h = caseSensitive ? b.code : b.code.toLowerCase();
+            return h.includes(needle);
+          });
+          if (codeMatches.length === 0) continue;
+        }
+
+        // ── reasoning snapshot ───────────────────────────────────────────
+        const reasoning = showReasoning
+          ? extractReasoningSnippet(content, query)
+          : null;
+
+        matches.push({
+          filePath,
+          project:    proj,
+          gitRemote,
+          sessionId:  basename(filePath, '.jsonl'),
+          timestamp:  msg.timestamp ?? sessionTs,
+          role:       msg.message?.role ?? msg.type,
+          text,
+          codeBlocks,
+          reasoning,
+          before: messages.slice(Math.max(0, i - context), i),
+          after:  messages.slice(i + 1, i + 1 + context),
+        });
+      }
     }
   }
+
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
   matches.sort((a, b) => {
     if (!a.timestamp && !b.timestamp) return 0;
